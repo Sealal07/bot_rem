@@ -1,6 +1,11 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import calendar
 
+month_dict = {'Январь': 1, 'Февраль': 2, 'Март': 3,
+                  'Апрель': 4, 'Май': 5, 'Июнь': 6, 'Июль': 7,
+                  'Август': 8, 'Сентябрь': 9, 'Октябрь': 10,
+                  'Ноябрь': 11, 'Декабрь': 12}
+
 # основная клавиатура
 def get_main_keyboard():
     buttons = [
@@ -29,10 +34,7 @@ def get_month_keyboard():
 
 # клавиатура для выбора дня
 def get_day_keyboard(month, year):
-    month_dict = {'Январь': 1, 'Февраль': 2, 'Март': 3,
-                  'Апрель': 4, 'Май': 5, 'Июнь': 6, 'Июль': 7,
-                  'Август': 8, 'Сентябрь': 9, 'Октябрь': 10,
-                  'Ноябрь': 11, 'Декабрь': 12}
+
     try:
         month_num = month_dict[month]
         year = int(year)

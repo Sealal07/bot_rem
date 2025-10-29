@@ -3,16 +3,16 @@ import calendar
 from datetime import datetime
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types.message import Message
+from aiogram.types import ReplyKeyboardRemove
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-
 from db import (create_db, get_user_reminder, add_reminder,
                 delete_reminder, get_all_reminders, set_user_timezone,
                 get_user_timezone)
 from keyboard import  (get_main_keyboard, get_month_keyboard,
                        get_day_keyboard, get_year_keyboard,
-                       get_timezone_keyboard, get_time_keyboard)
+                       get_timezone_keyboard, get_time_keyboard, month_dict)
 
 from config import  TOKEN
 import pytz
@@ -31,11 +31,56 @@ TIMEZONE_MAP = {
                'Алматы (UTC+6)': 'Asia/Almaty'
 }
 
+user_reminder = {} #для хранения в памяти для удаления
+
+# FSM для хранения конечных состояний (для напоминаний)
+class ReminderStates(StatesGroup):
+    choose_month = State()
+    choose_year = State()
+    choose_day = State()
+    choose_time = State()
+    choose_text = State()
+
+
 # FSM для настройки часового пояса
 class Timezone(StatesGroup):
     choosing_custom_timezone = State()
-    #
+    requesting_delete_timezone = State()
 
+
+# фоновая задача проверки напоминания
+async def check_r(bot):
+    while True:
+        try:
+            all_reminders = get_all_reminders()
+            now_utc = datetime.now(pytz.utc)
+            for r_id, user_id, r_text, r_date, r_time in all_reminders:
+                timezone_name = await get_user_timezone(user_id)
+                if not timezone_name:
+                    continue
+                try:
+                    day, month_name, year = r_date.split()
+                    month = month_dict[month_name]
+                    hour, minute = r_time.split(':')
+                    reminder_time = datetime(int(year),
+                                             month, int(day),
+                                             int(hour), int(minute))
+                #     локализируем время в часовом поясе пользователя
+                    user_tz = pytz.timezone(timezone_name)
+                    localized_time = user_tz.localize(reminder_time)
+                    utc_time = localized_time.astimezone(pytz.utc)
+                    if now_utc >= utc_time:
+                        await bot.send_message(user_id,
+                                               f'Напоминание: {r_text}')
+                        await delete_reminder(r_id)
+                except Exception as e:
+                   print(f'Ошибка обработки напоминания {r_id} '
+                         f'для {user_id}: {e}')
+
+        except Exception as e:
+            print(f'Критическая ошибка в check_r: {e}')
+
+        await asyncio.sleep(20)
 
 @router.message(Command('start'))
 async def start_handler(message: Message, state: FSMContext):
@@ -46,10 +91,146 @@ async def start_handler(message: Message, state: FSMContext):
         await message.answer(
             text='Привет! Для корректной работы выберите ваш'
                  'город или введите часовой пояс',
-            reply_markup=get_main_keyboard()
+            reply_markup=get_timezone_keyboard()
         )
     else:
         await  message.answer(
             text='Добро пожаловать! Чем могу помочь?',
             reply_markup=get_main_keyboard()
         )
+
+@router.message(F.text.in_(TIMEZONE_CITIES))
+async def set_timezone_handler(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    city = message.text
+    print(user_id, city)
+    if city == 'Другой':
+        await message.answer(
+            text='Пожалуйста, введите ваш часовой пояс в формате '
+                 '"Continent/City" (например: "Europe/Moscow")',
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await  state.set_state(Timezone.choosing_custom_timezone)
+    else:
+        timezone_name = TIMEZONE_MAP[city]
+        print(timezone_name)
+        await set_user_timezone(user_id, timezone_name)
+        await message.answer(
+            text=f'Часовой пояс установлен: {city}. '
+                 f'Теперь вы можете создать напоминание!',
+            reply_markup=get_main_keyboard()
+        )
+        await state.clear()
+@router.message(Timezone.choosing_custom_timezone)
+async def custom_timezone_handler(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    timezone_name = message.text.strip()
+    try:
+        pytz.timezone(timezone_name)
+        await set_user_timezone(user_id, timezone_name)
+        await message.answer(
+            text=f'Часовой пояс установлен: {timezone_name}. '
+                 f'Теперь вы можете создать напоминание!',
+            reply_markup=get_main_keyboard()
+        )
+        await state.clear()
+    except pytz.exceptions.UnknownTimeZoneError:
+        await message.answer(
+            text=f'Неизвестный часовой пояс! Пожалуйста, '
+                 f'попробуйте еще раз'
+        )
+
+@router.message(F.text == 'Создать напоминание')
+async def create_reminder_handler(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    timezone_name = await get_user_timezone(user_id)
+    if not timezone_name:
+        await message.answer(
+            'Сначала установите ваш часовой пояс',
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+    await message.answer('Выберите месяц: ',
+                         reply_markup=get_month_keyboard())
+    await state.set_state(ReminderStates.choose_month)
+
+@router.message(ReminderStates.choose_month, F.text.in_(month_dict.keys()))
+async def choose_month_handler(message: Message, state: FSMContext):
+    await state.update_data(month=message.text)
+    await message.answer('Выберите год:',
+                         reply_markup=get_year_keyboard())
+    await state.set_state(ReminderStates.choose_year)
+
+@router.message(ReminderStates.choose_year, F.text.in_(['2025', '2026', '2027', '2028']))
+async def choose_year_handler(message: Message, state: FSMContext):
+    data = await state.get_data()
+    month = data['month']
+    year = message.text
+
+    await state.update_data(year=year)
+
+    await message.answer(
+        f'Вы выбрали {month} {year}. \nВыберите день: ',
+        reply_markup=get_day_keyboard(month, year)
+    )
+    await state.set_state(ReminderStates.choose_day)
+
+@router.message(ReminderStates.choose_day)
+async def choose_day_handler(message: Message, state: FSMContext):
+    day_str = message.text.strip()
+    if not day_str.isdigit():
+        data = await state.get_data()
+        await message.answer(
+            'Пожалуйста, введите число!',
+            reply_markup=get_day_keyboard(data['month'], data['year'])
+        )
+        return
+    day = int(day_str)
+    data = await  state.get_data()
+    month = data['month']
+    year = int(data['year'])
+    month_num = month_dict[month]
+    try:
+        days_in_month = calendar.monthrange(year, month_num)[1]
+        if 1 <= day <= days_in_month:
+            await state.update_data(day=day)
+            await message.answer(
+                f'Вы выбрали {day}-{month}-{year}.\nТеперь выберите'
+                f'или введите время в формате в HH:MM',
+                reply_markup=get_time_keyboard()
+            )
+        else:
+            await message.answer(
+                f'Такого дня в этом  месяце не существует.'
+                f'Выберите правильный день',
+                reply_markup=get_day_keyboard(month, year)
+            )
+    except Exception:
+        await message.answer('Произошла ошибка при проверке даты.'
+                             'Попробуйте еще раз')
+        await state.clear()
+
+
+
+
+# reminder_time = datetime(2025, 10, 29, 18, 59)
+# user_tz = pytz.timezone('Europe/Moscow')
+# print(user_tz)
+# localized_time = user_tz.localize(reminder_time)
+# print(localized_time)
+# utc_time = localized_time.astimezone(pytz.utc)
+# print(utc_time)
+
+async def main():
+    await create_db()
+    print('база готова')
+    asyncio.create_task(check_r(bot))
+    print('фоновая задача запущена')
+
+    await dp.start_polling(bot)
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print('бот остановлен')

@@ -47,11 +47,13 @@ async def delete_reminder(r_id):
 
 
 async def set_user_timezone(user_id, timezone):
+    print('запуск set')
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('''
             insert into user_timezones(user_id, timezone)
             values (?, ?)
         ''', (user_id, timezone))
+        await db.commit()
 
 async def get_user_timezone(user_id):
     async with aiosqlite.connect(DB_NAME) as db:
