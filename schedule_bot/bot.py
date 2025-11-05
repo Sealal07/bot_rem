@@ -200,6 +200,7 @@ async def choose_day_handler(message: Message, state: FSMContext):
                 f'или введите время в формате в HH:MM',
                 reply_markup=get_time_keyboard()
             )
+            await state.set_state(ReminderStates.choose_time)
         else:
             await message.answer(
                 f'Такого дня в этом  месяце не существует.'
@@ -270,7 +271,7 @@ async def show_reminder_handler(message: Message):
 async def delete_text_handler(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
-    if user_id not in user_reminder or user_reminder[user_id]:
+    if user_id not in user_reminder or not user_reminder[user_id]:
         await message.answer('Сначала запросите список напоминаний',
                              reply_markup=get_main_keyboard())
         return
