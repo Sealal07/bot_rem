@@ -1,5 +1,6 @@
 import asyncio
 import calendar
+import re
 from datetime import datetime
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types.message import Message
@@ -45,14 +46,14 @@ class ReminderStates(StatesGroup):
 # FSM для настройки часового пояса
 class Timezone(StatesGroup):
     choosing_custom_timezone = State()
-    requesting_delete_timezone = State()
+    requesting_delete_reminder = State()
 
 
 # фоновая задача проверки напоминания
 async def check_r(bot):
     while True:
         try:
-            all_reminders = get_all_reminders()
+            all_reminders = await get_all_reminders()
             now_utc = datetime.now(pytz.utc)
             for r_id, user_id, r_text, r_date, r_time in all_reminders:
                 timezone_name = await get_user_timezone(user_id)
@@ -209,6 +210,104 @@ async def choose_day_handler(message: Message, state: FSMContext):
         await message.answer('Произошла ошибка при проверке даты.'
                              'Попробуйте еще раз')
         await state.clear()
+
+
+@router.message(ReminderStates.choose_time)
+async def choose_time_handler(message: Message, state: FSMContext):
+    time_str = message.text.strip()
+    if not re.match(r'^\d{2}:\d{2}$', time_str):
+        await message.answer('Введите правильный формат времени:'
+                             'HH:MM, (например 14:56)',
+                             reply_markup=get_time_keyboard())
+        return
+    await state.update_data(time=time_str)
+    data = await state.get_data()
+    await message.answer(
+        f'Вы выбрали {time_str}. '
+        f'Дата: {data['day']}-{data['month']}-{data['year']}.'
+        f'\nВведите текст напоминания:',
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(ReminderStates.choose_text)
+
+@router.message(ReminderStates.choose_text)
+async def choose_text_handler(message: Message, state: FSMContext):
+    r_text = message.text
+    user_id = message.from_user.id
+
+    data = await state.get_data()
+    day = data['day']
+    month = data['month']
+    year = data['year']
+    r_date = f'{day} {month} {year}'
+    r_time = data['time']
+
+    await add_reminder(user_id, r_text, r_date, r_time)
+
+    await message.answer('Напоминание сохранено!',
+                         reply_markup=get_main_keyboard())
+    await state.clear()
+
+
+@router.message(F.text == 'Мои напоминания')
+async def show_reminder_handler(message: Message):
+    user_id = message.from_user.id
+    reminders = await get_user_reminder(user_id)
+
+    if not reminders:
+        await message.answer('У вас нет напоминаний',
+                             reply_markup=get_main_keyboard())
+        return
+
+    response = 'Ваши напоминания: \n'
+    user_reminder[user_id] = reminders
+
+    for i, (db_id, text, date, time) in enumerate(reminders, start=1):
+        response += f'{i}. {text} - {date} в {time} \n'
+    await message.answer(response, reply_markup=get_main_keyboard())
+
+@router.message(F.text == 'Удалить напоминание')
+async def delete_text_handler(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    if user_id not in user_reminder or user_reminder[user_id]:
+        await message.answer('Сначала запросите список напоминаний',
+                             reply_markup=get_main_keyboard())
+        return
+    await message.answer('Введите напоминания, которе хотите удалить',
+                         reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Timezone.requesting_delete_reminder)
+
+@router.message(Timezone.requesting_delete_reminder)
+async def delete_rem_handler(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    try:
+        reminder_num = int(message.text)
+        reminders = user_reminder[user_id]
+        if 1 <= reminder_num <= len(reminders):
+            real_id = reminders[reminder_num-1][0]
+            await delete_reminder(real_id)
+            await message.answer('напоминание удалено',
+                                 reply_markup=get_main_keyboard())
+            del user_reminder[user_id]
+            await show_reminder_handler(message)
+        else:
+            await message.answer('некорректный номер')
+    except ValueError:
+        await message.answer('введите число')
+    except KeyError:
+        await message.answer('Сначала запросите список напоминаний',
+                             reply_markup=get_main_keyboard())
+        await state.clear()
+
+    if not state.get_state():
+        await state.clear()
+
+
+
+
+
+
 
 
 
